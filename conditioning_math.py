@@ -133,8 +133,11 @@ class SD1XConditioningMathInvocation(BaseInvocation):
         elif self.operation == "PROJ":
             cOut = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
         elif self.operation == "APPEND":
-            print(f"Conditioning A: {cA.shape}")
             cOut = torch.cat((cA, cB), dim=1)
+        elif self.operation == "BLEFT":
+            cOut = torch.cat((cUnc, cB), dim=1)
+        elif self.operation == "BRIGHT":
+            cOut = torch.cat((cB, cUnc), dim=1)
 
         conditioning_data = ConditioningFieldData(
             conditionings=[
