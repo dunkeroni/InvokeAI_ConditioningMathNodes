@@ -1,1 +1,1 @@
-from comditioning_math import SD1XConditioningMathInvocation, NormalizeConditioningInvocation
+from conditioning_math import SD1XConditioningMathInvocation, NormalizeConditioningInvocation
