@@ -65,7 +65,8 @@ class SD1XConditioningMathInvocation(BaseInvocation):
     """Compute between two conditioning latents"""
     
     operation: CONDITIONING_OPERATIONS = InputField(
-        default="LERP", description="The operation to perform", ui_choice_labels=CONDITIONING_OPERATIONS_LABELS
+        default="LERP", description="The operation to perform", ui_choice_labels=CONDITIONING_OPERATIONS_LABELS,
+        input=Input.Direct
     )
     a: ConditioningField = InputField(
         description="Conditioning A",
@@ -201,7 +202,8 @@ class NormalizeConditioningInvocation(BaseInvocation):
         description="Conditioning"
     )
     operation: NORMALIZE_OPERATIONS = InputField(
-        default="INFO", description="The operation to perform", ui_choice_labels=NORMALIZE_OPERATIONS_LABELS
+        default="INFO", description="The operation to perform", ui_choice_labels=NORMALIZE_OPERATIONS_LABELS,
+        input=Input.Direct
     )
     mean: float = InputField(
         default=-0.1,
