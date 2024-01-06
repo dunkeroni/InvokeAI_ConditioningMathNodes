@@ -26,8 +26,6 @@ CONDITIONING_OPERATIONS = Literal[
     "ADD",
     "SUB",
     "APPEND",
-    "PREPEND",
-    #"SLERP", #NOT IMPLEMENTED in torch at this time. May be worth writing our own method
     "PERP",
     "PROJ",
 ]
@@ -38,8 +36,6 @@ CONDITIONING_OPERATIONS_LABELS = {
     "ADD": "Add A+αB",
     "SUB": "Subtract A-αB",
     "APPEND": "Append [A, B]",
-    "PREPEND": "Prepend [B, A]",
-    #"SLERP": "Spherical Interpolation A~>B",
     "PERP": "Perpendicular A⊥B",
     "PROJ": "Projection A||B",
 }
@@ -129,8 +125,7 @@ class ConditioningMathInvocation(BaseInvocation):
                 embeds = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
             elif self.operation == "APPEND":
                 embeds = torch.cat((cA, cB), dim=1)
-            elif self.operation == "PREPEND":
-                embeds = torch.cat((cB, cA), dim=1)
+                ec_tokens = cA.shape[1] + ec_B_tokens #append is the only time this changes
 
             conditioning_data = ConditioningFieldData(
                 conditionings=[
@@ -161,16 +156,6 @@ class ConditioningMathInvocation(BaseInvocation):
             
             ec_tokens = max(ec_A_tokens, ec_B_tokens) #not sure if this is ever used, but this should be a safe assumption
 
-            #DEBUG Read out all shape informations
-            print(f"Shape A: {cA.shape}")
-            print(f"Shape B: {cB.shape}")
-            print(f"Shape pooled A: {pooled_embeds.shape}")
-            print(f"Shape pooled B: {pooled_B.shape}")
-            print(f"Shape add_time_ids A: {add_time_ids.shape}")
-            print(f"Shape add_time_ids B: {add_time_ids_B.shape}")
-            print(f"ec_A_tokens: {ec_A_tokens}")
-            print(f"ec_B_tokens: {ec_B_tokens}")
-
             if self.operation == "ADD":
                 torch.add(cA, cB, alpha=self.alpha, out=embeds)
                 torch.add(pooled_embeds, pooled_B, alpha=self.alpha, out=pooled_embeds)
@@ -190,10 +175,7 @@ class ConditioningMathInvocation(BaseInvocation):
                 pooled_embeds = (((torch.mul(pooled_embeds, pooled_B).sum())/(torch.norm(pooled_B)**2)) * pooled_B).detach().clone()
             elif self.operation == "APPEND":
                 embeds = torch.cat((cA, cB), dim=1)
-                ec_tokens = cA.shape[1] + ec_B_tokens #pre/append is the only time this changes
-            elif self.operation == "PREPEND":
-                embeds = torch.cat((cB, cA), dim=1)
-                ec_tokens = cB.shape[1] + ec_A_tokens #pre/append is the only time this changes
+                ec_tokens = cA.shape[1] + ec_B_tokens #append is the only time this changes
 
             conditioning_data = ConditioningFieldData(
                 conditionings=[
