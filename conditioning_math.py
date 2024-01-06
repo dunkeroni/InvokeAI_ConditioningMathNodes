@@ -6,7 +6,7 @@ from pydantic import ValidationInfo, field_validator
 
 from invokeai.app.invocations.primitives import FloatOutput, IntegerOutput, ConditioningField, ConditioningOutput
 from invokeai.app.shared.fields import FieldDescriptions
-from invokeai.app.invocations.compel import ConditioningFieldData, BasicConditioningInfo
+from invokeai.app.invocations.compel import ConditioningFieldData, BasicConditioningInfo, SDXLConditioningInfo, ExtraConditioningInfo
 
 from invokeai.app.invocations.baseinvocation import (
     BaseInvocation,
@@ -23,139 +23,199 @@ from invokeai.app.invocations.baseinvocation import (
 
 CONDITIONING_OPERATIONS = Literal[
     "LERP",
-    "APPEND",
     "ADD",
     "SUB",
+    "APPEND",
+    "PREPEND",
     #"SLERP", #NOT IMPLEMENTED in torch at this time. May be worth writing our own method
     "PERP",
     "PROJ",
-    "BLEFT",
-    "BRIGHT",
 ]
 
 
 CONDITIONING_OPERATIONS_LABELS = {
     "LERP": "Linear Interpolation A->B",
-    "APPEND": "Append [A, B]",
     "ADD": "Add A+αB",
     "SUB": "Subtract A-αB",
+    "APPEND": "Append [A, B]",
+    "PREPEND": "Prepend [B, A]",
     #"SLERP": "Spherical Interpolation A~>B",
     "PERP": "Perpendicular A⊥B",
     "PROJ": "Projection A||B",
-    "BLEFT": "Buffer Left [Unc, B]",
-    "BRIGHT": "Buffer Right [B, Unc]"
 }
 
 
-CONDITIONING_FORMATS = Literal[
-    "SD1",
-    "SD2",
-    "SDXL"
-]
-
-
 @invocation(
-    "SD_1.X_Conditioning_Math",
-    title="SD 1.X Conditioning Math",
+    "Conditioning_Math",
+    title="Conditioning Math",
     tags=["math", "conditioning", "prompt", "blend", "interpolate", "append", "perpendicular", "projection"],
     category="math",
     version="1.0.0",
 )
-class SD1XConditioningMathInvocation(BaseInvocation):
+class ConditioningMathInvocation(BaseInvocation):
     """Compute between two conditioning latents"""
     
-    operation: CONDITIONING_OPERATIONS = InputField(
-        default="LERP", description="The operation to perform", ui_choice_labels=CONDITIONING_OPERATIONS_LABELS,
-        input=Input.Direct
-    )
     a: ConditioningField = InputField(
         description="Conditioning A",
-        default=None
+        input=Input.Connection, #A is required for extra information in some operations
+        ui_order=0,
     )
     b: ConditioningField = InputField(
         description="Conditioning B",
-        input=Input.Connection, #B is required for scaling operations
-    )
-    empty_conditioning: ConditioningField = InputField(
-        description="Optional: Result of an empty prompt conditioning. Used to pad the inputs if they are different sizes. Leave blank to use zeros (SDXL).",
-        title="[optional] Empty tensor",
-        default = None,
+        default=None,
+        ui_order=1,
     )
     alpha: float = InputField(
         default=1,
         description="Alpha value for interpolation and scaling",
-        ge=0.0
+        title="α [optional]",
+        ge=0.0,
+        ui_order=3,
     )
+    operation: CONDITIONING_OPERATIONS = InputField(
+        default="LERP", description="The operation to perform", ui_choice_labels=CONDITIONING_OPERATIONS_LABELS,
+        input=Input.Direct,
+        ui_order=2,
+    )
+
 
     @torch.no_grad()
     def invoke(self, context: InvocationContext) -> ConditioningOutput:
 
-        conditioning_B = context.services.latents.get(self.b.conditioning_name)
-        cB: torch.Tensor = conditioning_B.conditionings[0].embeds.detach().clone().to("cpu")
-        if self.a is None:
-            cA = torch.zeros_like(cB).to(cB.device)
+        conditioning_A: BasicConditioningInfo = context.services.latents.get(self.a.conditioning_name).conditionings[0]
+        cA: torch.Tensor = conditioning_A.embeds.detach().clone().to("cpu")
+        dt = cA.dtype
+        cA = cA.to(torch.float32)
+        if self.b is None:
+            cB = torch.zeros_like(cA)
         else:
-            conditioning_A = context.services.latents.get(self.a.conditioning_name)
-            cA = conditioning_A.conditionings[0].embeds.detach().clone().to("cpu")
-
-        if self.empty_conditioning is None:
-            cUnc = torch.zeros_like(cB).to(cB.device)
-        else:
-            conditioning_Unc = context.services.latents.get(self.empty_conditioning.conditioning_name)
-            cUnc = conditioning_Unc.conditionings[0].embeds.detach().clone().to("cpu")
+            conditioning_B: BasicConditioningInfo = context.services.latents.get(self.b.conditioning_name).conditionings[0]
+            cB = conditioning_B.embeds.detach().clone().to("cpu", dtype=torch.float32)
+        
+            #check that inputs are the same type
+            if type(conditioning_A) != type(conditioning_B):
+                raise ValueError(f"Conditioning A: {type(conditioning_A)} does not match Conditioning B: {type(conditioning_B)}")
         
         shape_A = cA.shape
         shape_B = cB.shape
-        shape_Unc = cUnc.shape
-        if not shape_A[2] == shape_B[2] == shape_Unc[2]:
-            raise ValueError(f"Conditioning A: {shape_A} does not match Conditioning B: {shape_B} or Unc: {shape_Unc}")
+
+        if not shape_A == shape_B:
+            raise ValueError(f"Conditioning A: {shape_A} does not match Conditioning B: {shape_B}")
         
+        if type(conditioning_A) == BasicConditioningInfo: #NOT SDXL
+            embeds: torch.Tensor = torch.zeros_like(cA)
+            extra_conditioning = conditioning_A.extra_conditioning
+            ec_A_tokens = extra_conditioning.tokens_count_including_eos_bos
+            ec_A_cross_attention = extra_conditioning.cross_attention_control_args
 
+            if self.b is None:
+                ec_B_tokens = 0
+            else:
+                ec_B_tokens = conditioning_B.extra_conditioning.tokens_count_including_eos_bos
 
-        cOut = torch.zeros_like(cA).to(cB.device)
+            ec_tokens = max(ec_A_tokens, ec_B_tokens) #not sure if this is ever used, but this should be a safe assumption
 
-        mean_A, std_A, var_A = torch.mean(cA), torch.std(cA), torch.var(cA)
-        print(f"Conditioning A: Mean: {mean_A}, Std: {std_A}, Var: {var_A}")
-        mean_B, std_B, var_B = torch.mean(cB), torch.std(cB), torch.var(cB)
-        print(f"Conditioning B: Mean: {mean_B}, Std: {std_B}, Var: {var_B}")
+            if self.operation == "ADD":
+                torch.add(cA, cB, alpha=self.alpha, out=embeds)
+            elif self.operation == "SUB":
+                torch.sub(cA, cB, alpha=self.alpha, out=embeds)
+            elif self.operation == "LERP":
+                torch.lerp(cA, cB, self.alpha, out=embeds)
+            elif self.operation == "PERP":
+                # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
+                #x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
+                embeds = (cA - ((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
+            elif self.operation == "PROJ":
+                embeds = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
+            elif self.operation == "APPEND":
+                embeds = torch.cat((cA, cB), dim=1)
+            elif self.operation == "PREPEND":
+                embeds = torch.cat((cB, cA), dim=1)
 
-        if self.operation == "ADD":
-            torch.add(cA, cB, alpha=self.alpha, out=cOut)
-        elif self.operation == "SUB":
-            torch.sub(cA, cB, alpha=self.alpha, out=cOut)
-        elif self.operation == "LERP":
-            torch.lerp(cA, cB, self.alpha, out=cOut)
-        #elif self.operation == "SLERP":
-            #torch.slerp(cA, cB, self.alpha, out=cOut)
-        elif self.operation == "PERP":
-            # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
-            #x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
-            cOut = (cA - ((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-        elif self.operation == "PROJ":
-            cOut = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-        elif self.operation == "APPEND":
-            cOut = torch.cat((cA, cB), dim=1)
-        elif self.operation == "BLEFT":
-            cOut = torch.cat((cUnc, cB), dim=1)
-        elif self.operation == "BRIGHT":
-            cOut = torch.cat((cB, cUnc), dim=1)
+            conditioning_data = ConditioningFieldData(
+                conditionings=[
+                    BasicConditioningInfo(
+                        embeds=embeds.to(dtype=dt),
+                        extra_conditioning=ExtraConditioningInfo(
+                            tokens_count_including_eos_bos=ec_tokens,
+                            cross_attention_control_args=ec_A_cross_attention, #not going to bother with cross attention control for now
+                        ),
+                    )
+                ]
+            )
+        else: #SDXL
+            embeds = torch.zeros_like(cA).to(cA.device)
+            ec_A_tokens = conditioning_A.extra_conditioning.tokens_count_including_eos_bos
+            ec_A_cross_attention = conditioning_A.extra_conditioning.cross_attention_control_args
+            pooled_embeds = conditioning_A.pooled_embeds.detach().clone().to("cpu", dtype=torch.float32) #default for operations that don't affect it
+            add_time_ids = conditioning_A.add_time_ids.detach().clone().to("cpu") #default for operations that don't affect it
 
-        conditioning_data = ConditioningFieldData(
-            conditionings=[
-                BasicConditioningInfo(
-                    embeds=cOut,
-                    extra_conditioning=None,
-                )
-            ]
-        )
+            if self.b is None:
+                pooled_B = torch.zeros_like(pooled_embeds).to("cpu", dtype=torch.float32)
+                add_time_ids_B = torch.zeros_like(add_time_ids).to("cpu")
+                ec_B_tokens = 0
+            else:
+                pooled_B = conditioning_B.pooled_embeds.detach().clone().to("cpu", dtype=torch.float32)
+                add_time_ids_B = conditioning_B.add_time_ids.detach().clone().to("cpu")
+                ec_B_tokens = conditioning_B.extra_conditioning.tokens_count_including_eos_bos
+            
+            ec_tokens = max(ec_A_tokens, ec_B_tokens) #not sure if this is ever used, but this should be a safe assumption
 
+            #DEBUG Read out all shape informations
+            print(f"Shape A: {cA.shape}")
+            print(f"Shape B: {cB.shape}")
+            print(f"Shape pooled A: {pooled_embeds.shape}")
+            print(f"Shape pooled B: {pooled_B.shape}")
+            print(f"Shape add_time_ids A: {add_time_ids.shape}")
+            print(f"Shape add_time_ids B: {add_time_ids_B.shape}")
+            print(f"ec_A_tokens: {ec_A_tokens}")
+            print(f"ec_B_tokens: {ec_B_tokens}")
+
+            if self.operation == "ADD":
+                torch.add(cA, cB, alpha=self.alpha, out=embeds)
+                torch.add(pooled_embeds, pooled_B, alpha=self.alpha, out=pooled_embeds)
+            elif self.operation == "SUB":
+                torch.sub(cA, cB, alpha=self.alpha, out=embeds)
+                torch.sub(pooled_embeds, pooled_B, alpha=self.alpha, out=pooled_embeds)
+            elif self.operation == "LERP":
+                torch.lerp(cA, cB, self.alpha, out=embeds)
+                torch.lerp(pooled_embeds, pooled_B, self.alpha, out=pooled_embeds)
+            elif self.operation == "PERP":
+                # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
+                #x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
+                embeds = (cA - ((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
+                pooled_embeds = (pooled_embeds - ((torch.mul(pooled_embeds, pooled_B).sum())/(torch.norm(pooled_B)**2)) * pooled_B).detach().clone()
+            elif self.operation == "PROJ":
+                embeds = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
+                pooled_embeds = (((torch.mul(pooled_embeds, pooled_B).sum())/(torch.norm(pooled_B)**2)) * pooled_B).detach().clone()
+            elif self.operation == "APPEND":
+                embeds = torch.cat((cA, cB), dim=1)
+                ec_tokens = cA.shape[1] + ec_B_tokens #pre/append is the only time this changes
+            elif self.operation == "PREPEND":
+                embeds = torch.cat((cB, cA), dim=1)
+                ec_tokens = cB.shape[1] + ec_A_tokens #pre/append is the only time this changes
+
+            conditioning_data = ConditioningFieldData(
+                conditionings=[
+                    SDXLConditioningInfo(
+                        embeds=embeds.to(dtype=dt),
+                        extra_conditioning=ExtraConditioningInfo(
+                            tokens_count_including_eos_bos=ec_tokens,
+                            cross_attention_control_args=ec_A_cross_attention, #not going to bother with cross attention control for now
+                        ),
+                        pooled_embeds=pooled_embeds.to(dtype=dt),
+                        add_time_ids=add_time_ids, #always from A, just includes size information
+                    )
+                ]
+            )
+        
         conditioning_name = f"{context.graph_execution_state_id}_{self.id}_conditioning"
         context.services.latents.save(conditioning_name, conditioning_data)
 
         return ConditioningOutput(
             conditioning=ConditioningField(
                 conditioning_name=conditioning_name,
-            ),
+            )
         )
 
 
@@ -196,10 +256,11 @@ NORMALIZE_OPERATIONS_LABELS = {
     version="1.0.0",
 )
 class NormalizeConditioningInvocation(BaseInvocation):
-    """Normalize a conditioning latent to have a mean and variance similar to another conditioning latent"""
+    """Normalize a conditioning (SD1.5) latent to have a mean and variance similar to another conditioning latent"""
     
     conditioning: ConditioningField = InputField(
-        description="Conditioning"
+        description="Conditioning",
+        input=Input.Connection,
     )
     operation: NORMALIZE_OPERATIONS = InputField(
         default="INFO", description="The operation to perform", ui_choice_labels=NORMALIZE_OPERATIONS_LABELS,
