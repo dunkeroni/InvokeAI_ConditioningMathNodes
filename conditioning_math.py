@@ -95,7 +95,7 @@ class ConditioningMathInvocation(BaseInvocation):
         shape_A = cA.shape
         shape_B = cB.shape
 
-        if not shape_A == shape_B:
+        if (shape_A != shape_B) and (self.operation != "APPEND"):
             raise ValueError(f"Conditioning A: {shape_A} does not match Conditioning B: {shape_B}")
         
         if type(conditioning_A) == BasicConditioningInfo: #NOT SDXL
