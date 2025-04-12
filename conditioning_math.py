@@ -42,6 +42,27 @@ CONDITIONING_OPERATIONS_LABELS = {
 }
 
 
+def apply_operation(operation: CONDITIONING_OPERATIONS, cA: torch.Tensor, cB: torch.Tensor, alpha: float):
+    embeds: torch.Tensor = torch.zeros_like(cA)
+    match operation:
+        case "ADD":
+            torch.add(cA, cB, alpha=alpha, out=embeds)
+        case "SUB":
+            torch.sub(cA, cB, alpha=alpha, out=embeds)
+        case "LERP":
+            torch.lerp(cA, cB, alpha, out=embeds)
+        case "PERP":
+            # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
+            # x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
+            embeds = (cA - (
+                        (torch.mul(cA, cB).sum()) / (torch.norm(cB) ** 2)) * cB).detach().clone()
+        case "PROJ":
+            embeds = (((torch.mul(cA, cB).sum()) / (torch.norm(cB) ** 2)) * cB).detach().clone()
+        case "APPEND":
+            embeds = torch.cat((cA, cB), dim=1)
+    return embeds
+
+
 @invocation(
     "Conditioning_Math",
     title="Conditioning Math",
@@ -99,23 +120,7 @@ class ConditioningMathInvocation(BaseInvocation):
             raise ValueError(f"Conditioning A: {shape_A} does not match Conditioning B: {shape_B}")
         
         if type(conditioning_A) == BasicConditioningInfo: #NOT SDXL
-            embeds: torch.Tensor = torch.zeros_like(cA)
-
-            if self.operation == "ADD":
-                torch.add(cA, cB, alpha=self.alpha, out=embeds)
-            elif self.operation == "SUB":
-                torch.sub(cA, cB, alpha=self.alpha, out=embeds)
-            elif self.operation == "LERP":
-                torch.lerp(cA, cB, self.alpha, out=embeds)
-            elif self.operation == "PERP":
-                # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
-                #x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
-                embeds = (cA - ((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-            elif self.operation == "PROJ":
-                embeds = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-            elif self.operation == "APPEND":
-                embeds = torch.cat((cA, cB), dim=1)
-                # ec_tokens = cA.shape[1] + ec_B_tokens #append is the only time this changes
+            embeds = apply_operation(self.operation, cA, cB, self.alpha)
 
             conditioning_data = ConditioningFieldData(
                 conditionings=[BasicConditioningInfo(embeds=embeds.to(dtype=dt))]
@@ -132,25 +137,8 @@ class ConditioningMathInvocation(BaseInvocation):
                 pooled_B = conditioning_B.pooled_embeds.detach().clone().to("cpu", dtype=torch.float32)
                 # add_time_ids_B = conditioning_B.add_time_ids.detach().clone().to("cpu")
 
-            if self.operation == "ADD":
-                torch.add(cA, cB, alpha=self.alpha, out=embeds)
-                torch.add(pooled_embeds, pooled_B, alpha=self.alpha, out=pooled_embeds)
-            elif self.operation == "SUB":
-                torch.sub(cA, cB, alpha=self.alpha, out=embeds)
-                torch.sub(pooled_embeds, pooled_B, alpha=self.alpha, out=pooled_embeds)
-            elif self.operation == "LERP":
-                torch.lerp(cA, cB, self.alpha, out=embeds)
-                torch.lerp(pooled_embeds, pooled_B, self.alpha, out=pooled_embeds)
-            elif self.operation == "PERP":
-                # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
-                #x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
-                embeds = (cA - ((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-                pooled_embeds = (pooled_embeds - ((torch.mul(pooled_embeds, pooled_B).sum())/(torch.norm(pooled_B)**2)) * pooled_B).detach().clone()
-            elif self.operation == "PROJ":
-                embeds = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-                pooled_embeds = (((torch.mul(pooled_embeds, pooled_B).sum())/(torch.norm(pooled_B)**2)) * pooled_B).detach().clone()
-            elif self.operation == "APPEND":
-                embeds = torch.cat((cA, cB), dim=1)
+            embeds = apply_operation(self.operation, cA, cB, self.alpha)
+            pooled_embeds = apply_operation(self.operation, pooled_embeds, pooled_B, self.alpha)
 
             conditioning_data = ConditioningFieldData(
                 conditionings=[
