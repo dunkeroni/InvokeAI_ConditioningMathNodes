@@ -100,16 +100,6 @@ class ConditioningMathInvocation(BaseInvocation):
         
         if type(conditioning_A) == BasicConditioningInfo: #NOT SDXL
             embeds: torch.Tensor = torch.zeros_like(cA)
-            # extra_conditioning = conditioning_A.extra_conditioning
-            # ec_A_tokens = extra_conditioning.tokens_count_including_eos_bos
-            # ec_A_cross_attention = extra_conditioning.cross_attention_control_args
-
-            # if self.b is None:
-            #     ec_B_tokens = 0
-            # else:
-            #     ec_B_tokens = conditioning_B.extra_conditioning.tokens_count_including_eos_bos
-
-            # ec_tokens = max(ec_A_tokens, ec_B_tokens) #not sure if this is ever used, but this should be a safe assumption
 
             if self.operation == "ADD":
                 torch.add(cA, cB, alpha=self.alpha, out=embeds)
@@ -128,33 +118,19 @@ class ConditioningMathInvocation(BaseInvocation):
                 # ec_tokens = cA.shape[1] + ec_B_tokens #append is the only time this changes
 
             conditioning_data = ConditioningFieldData(
-                conditionings=[
-                    BasicConditioningInfo(
-                        embeds=embeds.to(dtype=dt),
-                        # extra_conditioning=ExtraConditioningInfo(
-                        #     tokens_count_including_eos_bos=ec_tokens,
-                        #     cross_attention_control_args=ec_A_cross_attention, #not going to bother with cross attention control for now
-                        # ),
-                    )
-                ]
+                conditionings=[BasicConditioningInfo(embeds=embeds.to(dtype=dt))]
             )
         else: #SDXL
             embeds = torch.zeros_like(cA).to(cA.device)
-            # ec_A_tokens = conditioning_A.extra_conditioning.tokens_count_including_eos_bos
-            # ec_A_cross_attention = conditioning_A.extra_conditioning.cross_attention_control_args
             pooled_embeds = conditioning_A.pooled_embeds.detach().clone().to("cpu", dtype=torch.float32) #default for operations that don't affect it
             add_time_ids = conditioning_A.add_time_ids.detach().clone().to("cpu") #default for operations that don't affect it
 
             if self.b is None:
                 pooled_B = torch.zeros_like(pooled_embeds).to("cpu", dtype=torch.float32)
                 add_time_ids_B = torch.zeros_like(add_time_ids).to("cpu")
-                # ec_B_tokens = 0
             else:
                 pooled_B = conditioning_B.pooled_embeds.detach().clone().to("cpu", dtype=torch.float32)
-                add_time_ids_B = conditioning_B.add_time_ids.detach().clone().to("cpu")
-                # ec_B_tokens = conditioning_B.extra_conditioning.tokens_count_including_eos_bos
-            
-            # ec_tokens = max(ec_A_tokens, ec_B_tokens) #not sure if this is ever used, but this should be a safe assumption
+                # add_time_ids_B = conditioning_B.add_time_ids.detach().clone().to("cpu")
 
             if self.operation == "ADD":
                 torch.add(cA, cB, alpha=self.alpha, out=embeds)
@@ -175,16 +151,11 @@ class ConditioningMathInvocation(BaseInvocation):
                 pooled_embeds = (((torch.mul(pooled_embeds, pooled_B).sum())/(torch.norm(pooled_B)**2)) * pooled_B).detach().clone()
             elif self.operation == "APPEND":
                 embeds = torch.cat((cA, cB), dim=1)
-                # ec_tokens = cA.shape[1] + ec_B_tokens #append is the only time this changes
 
             conditioning_data = ConditioningFieldData(
                 conditionings=[
                     SDXLConditioningInfo(
                         embeds=embeds.to(dtype=dt),
-                        # extra_conditioning=ExtraConditioningInfo(
-                        #     tokens_count_including_eos_bos=ec_tokens,
-                        #     cross_attention_control_args=ec_A_cross_attention, #not going to bother with cross attention control for now
-                        # ),
                         pooled_embeds=pooled_embeds.to(dtype=dt),
                         add_time_ids=add_time_ids, #always from A, just includes size information
                     )
@@ -276,12 +247,7 @@ class NormalizeConditioningInvocation(BaseInvocation):
         mean_out, std_out, var_out = torch.mean(c), torch.std(c), torch.var(c)
 
         conditioning_data = ConditioningFieldData(
-            conditionings=[
-                BasicConditioningInfo(
-                    embeds=c,
-                    # extra_conditioning=None,
-                )
-            ]
+            conditionings=[BasicConditioningInfo(embeds=c)]
         )
 
         conditioning_name = context.conditioning.save(conditioning_data)
