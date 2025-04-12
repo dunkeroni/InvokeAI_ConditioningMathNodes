@@ -180,7 +180,6 @@ class ExtendedConditioningOutput(BaseInvocationOutput):
     variance: float = OutputField(description="Standard deviation of conditioning")
     token_length: int = OutputField(description="Length of each token in the conditioning")
     token_space: int = OutputField(description="Number of tokens in the conditioning")
-    tokens_used: int = OutputField(description="Number of tokens used in the conditioning")
 
 
 
@@ -205,7 +204,7 @@ NORMALIZE_OPERATIONS_LABELS = {
     title="Normalize Conditioning",
     tags=["math", "conditioning", "normalize", "info", "mean", "variance"],
     category="math",
-    version="1.0.0",
+    version="2.0.0",
 )
 class NormalizeConditioningInvocation(BaseInvocation):
     """Normalize a conditioning (SD1.5) latent to have a mean and variance similar to another conditioning latent"""
@@ -253,12 +252,9 @@ class NormalizeConditioningInvocation(BaseInvocation):
         conditioning_name = context.conditioning.save(conditioning_data)
 
         return ExtendedConditioningOutput(
-            conditioning=ConditioningField(
-                conditioning_name=conditioning_name,
-            ),
+            conditioning=ConditioningField(conditioning_name=conditioning_name),
             mean=mean_out,
             variance=var_out,
             token_length=c.shape[2],
             token_space=c.shape[1],
-            tokens_used=conditioning.conditionings[0].extra_conditioning.tokens_count_including_eos_bos
         )
