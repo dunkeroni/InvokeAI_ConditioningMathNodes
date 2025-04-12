@@ -3,6 +3,8 @@ from typing import Literal
 import numpy as np
 import torch
 
+from invokeai.app.invocations.fields import FluxConditioningField
+from invokeai.app.invocations.primitives import FluxConditioningOutput
 from invokeai.backend.stable_diffusion.diffusion.conditioning_data import FLUXConditioningInfo, \
     SD3ConditioningInfo, CogView4ConditioningInfo
 from invokeai.invocation_api import (
@@ -188,6 +190,44 @@ class ConditioningMathInvocation(BaseInvocation):
                 f"Conditioning A: {type(conditioning_A)} does not match Conditioning B: {type(conditioning_B)}"
             )
 
+
+@invocation(
+    "Conditioning_Math_FLUX",
+    title="Conditioning Math - FLUX",
+    tags=["math", "conditioning", "prompt", "blend", "interpolate", "append", "perpendicular", "projection"],
+    category="math",
+    version="1.0.1",
+)
+class FluxConditioningMathInvocation(ConditioningMathInvocation):
+    a: FluxConditioningField = InputField(
+        description="Conditioning A",
+        input=Input.Connection, #A is required for extra information in some operations
+        ui_order=0,
+    )
+    b: FluxConditioningField = InputField(
+        description="Conditioning B",
+        default=None,
+        ui_order=1,
+    )
+
+    def invoke(self, context: InvocationContext) -> FluxConditioningOutput:
+        conditioning_A = self._load_conditioning(context, self.a)
+        conditioning_B = self._load_conditioning(context, self.b)
+        clip_a: torch.Tensor = conditioning_A.clip_embeds
+        clip_b: torch.Tensor = conditioning_B.clip_embeds if conditioning_B else None
+        clip_embeds = apply_operation(self.operation, clip_a, clip_b, self.alpha)
+
+        t5_a: torch.Tensor = conditioning_A.t5_embeds
+        t5_b: torch.Tensor = conditioning_B.t5_embeds if conditioning_B else None
+        t5_embeds = apply_operation(self.operation, t5_a, t5_b, self.alpha)
+        conditioning_info = FLUXConditioningInfo(clip_embeds, t5_embeds)
+        conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
+        conditioning_name = context.conditioning.save(conditioning_data)
+        return FluxConditioningOutput(
+            conditioning=FluxConditioningField(
+                conditioning_name=conditioning_name
+            )
+        )
 
 
 @invocation_output("extended_conditioning_output")
