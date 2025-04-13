@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Protocol
 
 import numpy as np
 import torch
@@ -81,6 +81,10 @@ def apply_operation(operation: CONDITIONING_OPERATIONS, a: torch.Tensor, b: torc
     return embeds.to(dtype=original_dtype)
 
 
+class NamedConditioningField(Protocol):
+    conditioning_name:str
+
+
 @invocation(
     "Conditioning_Math",
     title="Conditioning Math",
@@ -148,9 +152,7 @@ class ConditioningMathInvocation(BaseInvocation):
         )
 
 
-    def _load_conditioning(
-        self, context: InvocationContext, field: ConditioningField | FluxConditioningField | CogView4ConditioningField,
-    ) -> (
+    def _load_conditioning(self, context: InvocationContext, field: NamedConditioningField) -> (
         BasicConditioningInfo
         | SDXLConditioningInfo
         | FLUXConditioningInfo
