@@ -3,8 +3,14 @@ from typing import Literal
 import numpy as np
 import torch
 
-from invokeai.app.invocations.fields import FluxConditioningField
-from invokeai.app.invocations.primitives import FluxConditioningOutput
+from invokeai.app.invocations.fields import (
+    FluxConditioningField,
+    CogView4ConditioningField,
+)
+from invokeai.app.invocations.primitives import (
+    FluxConditioningOutput,
+    CogView4ConditioningOutput,
+)
 from invokeai.backend.stable_diffusion.diffusion.conditioning_data import FLUXConditioningInfo, \
     SD3ConditioningInfo, CogView4ConditioningInfo
 from invokeai.invocation_api import (
@@ -164,7 +170,7 @@ class ConditioningMathInvocation(BaseInvocation):
         )
 
     def _load_conditioning(
-        self, context: InvocationContext, field: ConditioningField
+        self, context: InvocationContext, field: ConditioningField | FluxConditioningField | CogView4ConditioningField,
     ) -> (
         BasicConditioningInfo
         | SDXLConditioningInfo
@@ -192,7 +198,7 @@ class ConditioningMathInvocation(BaseInvocation):
 
 
 @invocation(
-    "Conditioning_Math_FLUX",
+    "FLUX_Conditioning_Math",
     title="Conditioning Math - FLUX",
     tags=["math", "conditioning", "prompt", "blend", "interpolate", "append", "perpendicular", "projection"],
     category="math",
@@ -225,6 +231,42 @@ class FluxConditioningMathInvocation(ConditioningMathInvocation):
         conditioning_name = context.conditioning.save(conditioning_data)
         return FluxConditioningOutput(
             conditioning=FluxConditioningField(
+                conditioning_name=conditioning_name
+            )
+        )
+
+
+@invocation(
+    "CogView4_Conditioning_Math",
+    title="Conditioning Math - CogView4",
+    tags=["math", "conditioning", "prompt", "blend", "interpolate", "append", "perpendicular", "projection"],
+    category="math",
+    version="1.0.1",
+)
+class CogView4ConditioningMathInvocation(ConditioningMathInvocation):
+    a: CogView4ConditioningField = InputField(
+        description="Conditioning A",
+        input=Input.Connection, #A is required for extra information in some operations
+        ui_order=0,
+    )
+    b: CogView4ConditioningField = InputField(
+        description="Conditioning B",
+        default=None,
+        ui_order=1,
+    )
+
+    def invoke(self, context: InvocationContext) -> CogView4ConditioningOutput:
+        conditioning_A = self._load_conditioning(context, self.a)
+        conditioning_B = self._load_conditioning(context, self.b)
+        glm_a: torch.Tensor = conditioning_A.glm_embeds
+        glm_b: torch.Tensor = conditioning_B.glm_embeds if conditioning_B else None
+        glm_embeds = apply_operation(self.operation, glm_a, glm_b, self.alpha)
+
+        conditioning_info = CogView4ConditioningInfo(glm_embeds)
+        conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
+        conditioning_name = context.conditioning.save(conditioning_data)
+        return CogView4ConditioningOutput(
+            conditioning=CogView4ConditioningField(
                 conditioning_name=conditioning_name
             )
         )
