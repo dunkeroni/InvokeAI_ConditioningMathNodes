@@ -144,11 +144,8 @@ class ConditioningMathInvocation(BaseInvocation):
 
         conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
         conditioning_name = context.conditioning.save(conditioning_data)
-
         return ConditioningOutput(
-            conditioning=ConditioningField(
-                conditioning_name=conditioning_name,
-            )
+            conditioning=ConditioningField(conditioning_name=conditioning_name)
         )
 
 
@@ -211,9 +208,7 @@ class FluxConditioningMathInvocation(ConditioningMathInvocation):
         conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
         conditioning_name = context.conditioning.save(conditioning_data)
         return FluxConditioningOutput(
-            conditioning=FluxConditioningField(
-                conditioning_name=conditioning_name
-            )
+            conditioning=FluxConditioningField(conditioning_name=conditioning_name)
         )
 
 
@@ -247,9 +242,7 @@ class CogView4ConditioningMathInvocation(ConditioningMathInvocation):
         conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
         conditioning_name = context.conditioning.save(conditioning_data)
         return CogView4ConditioningOutput(
-            conditioning=CogView4ConditioningField(
-                conditioning_name=conditioning_name
-            )
+            conditioning=CogView4ConditioningField(conditioning_name=conditioning_name)
         )
 
 
