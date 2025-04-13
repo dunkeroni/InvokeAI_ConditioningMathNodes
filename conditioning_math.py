@@ -121,44 +121,22 @@ class ConditioningMathInvocation(BaseInvocation):
         conditioning_A = self._load_conditioning(context, self.a)
         conditioning_B = self._load_conditioning(context, self.b)
 
-        match conditioning_A:
-            case SDXLConditioningInfo():
-                cA: torch.Tensor = conditioning_A.embeds
-                cB = conditioning_B.embeds if conditioning_B else None
-                embeds = apply_operation(self.operation, cA, cB, self.alpha)
+        cA: torch.Tensor = conditioning_A.embeds
+        cB = conditioning_B.embeds if conditioning_B else None
+        embeds = apply_operation(self.operation, cA, cB, self.alpha)
 
-                pooled_embeds = conditioning_A.pooled_embeds
-                pooled_B = conditioning_B.pooled_embeds if conditioning_B else None
-                pooled_embeds = apply_operation(self.operation, pooled_embeds, pooled_B, self.alpha)
+        if isinstance(conditioning_A, SDXLConditioningInfo):
+            pooled_embeds = conditioning_A.pooled_embeds
+            pooled_B = conditioning_B.pooled_embeds if conditioning_B else None
+            pooled_embeds = apply_operation(self.operation, pooled_embeds, pooled_B, self.alpha)
 
-                conditioning_info = SDXLConditioningInfo(
-                    embeds=embeds,
-                    pooled_embeds=pooled_embeds,
-                    add_time_ids=conditioning_A.add_time_ids, #always from A, just includes size information
-                )
-            case BasicConditioningInfo():
-                cA: torch.Tensor = conditioning_A.embeds
-                cB = conditioning_B.embeds if conditioning_B else None
-                embeds = apply_operation(self.operation, cA, cB, self.alpha)
-                conditioning_info = BasicConditioningInfo(embeds=embeds)
-            case FLUXConditioningInfo():
-                clip_a: torch.Tensor = conditioning_A.clip_embeds
-                clip_b: torch.Tensor = conditioning_B.clip_embeds if conditioning_B else None
-                clip_embeds = apply_operation(self.operation, clip_a, clip_b, self.alpha)
-
-                t5_a: torch.Tensor = conditioning_A.t5_embeds
-                t5_b: torch.Tensor = conditioning_B.t5_embeds if conditioning_B else None
-                t5_embeds = apply_operation(self.operation, t5_a, t5_b, self.alpha)
-                conditioning_info = FLUXConditioningInfo(clip_embeds, t5_embeds)
-            case CogView4ConditioningInfo():
-                glm_a: torch.Tensor = conditioning_A.glm_embeds
-                glm_b: torch.Tensor = conditioning_B.glm_embeds if conditioning_B else None
-                glm_embeds = apply_operation(self.operation, glm_a, glm_b, self.alpha)
-                conditioning_info = CogView4ConditioningInfo(glm_embeds)
-            case SD3ConditioningInfo():
-                raise NotImplementedError("TODO: SD3")
-            case _:
-                raise NotImplementedError(f"Unknown conditioning info {conditioning_A}")
+            conditioning_info = SDXLConditioningInfo(
+                embeds=embeds,
+                pooled_embeds=pooled_embeds,
+                add_time_ids=conditioning_A.add_time_ids, #always from A, just includes size information
+            )
+        else:
+            conditioning_info = BasicConditioningInfo(embeds=embeds)
 
         conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
         conditioning_name = context.conditioning.save(conditioning_data)
@@ -168,6 +146,7 @@ class ConditioningMathInvocation(BaseInvocation):
                 conditioning_name=conditioning_name,
             )
         )
+
 
     def _load_conditioning(
         self, context: InvocationContext, field: ConditioningField | FluxConditioningField | CogView4ConditioningField,
