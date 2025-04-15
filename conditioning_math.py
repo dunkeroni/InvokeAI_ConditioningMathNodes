@@ -1,8 +1,18 @@
-from typing import Literal
+from typing import Literal, Protocol
 
 import numpy as np
 import torch
 
+from invokeai.app.invocations.fields import (
+    FluxConditioningField,
+    CogView4ConditioningField,
+)
+from invokeai.app.invocations.primitives import (
+    FluxConditioningOutput,
+    CogView4ConditioningOutput,
+)
+from invokeai.backend.stable_diffusion.diffusion.conditioning_data import FLUXConditioningInfo, \
+    SD3ConditioningInfo, CogView4ConditioningInfo
 from invokeai.invocation_api import (
     BaseInvocation,
     BaseInvocationOutput,
@@ -42,6 +52,39 @@ CONDITIONING_OPERATIONS_LABELS = {
 }
 
 
+def apply_operation(operation: CONDITIONING_OPERATIONS, a: torch.Tensor, b: torch.Tensor | None, alpha: float):
+    if b is None:
+        b = torch.zeros_like(a)
+    original_dtype = a.dtype
+    a, b, = a.to(dtype=torch.float32), b.to(dtype=torch.float32)
+    embeds: torch.Tensor = torch.zeros_like(a)
+
+    if operation != "APPEND" and a.shape != b.shape:
+        raise ValueError(f"Conditioning A: {a.shape} does not match Conditioning B: {b.shape}")
+
+    match operation:
+        case "ADD":
+            torch.add(a, b, alpha=alpha, out=embeds)
+        case "SUB":
+            torch.sub(a, b, alpha=alpha, out=embeds)
+        case "LERP":
+            torch.lerp(a, b, alpha, out=embeds)
+        case "PERP":
+            # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
+            # x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
+            embeds = (a - (
+                    (torch.mul(a, b).sum()) / (torch.norm(b) ** 2)) * b).detach().clone()
+        case "PROJ":
+            embeds = (((torch.mul(a, b).sum()) / (torch.norm(b) ** 2)) * b).detach().clone()
+        case "APPEND":
+            embeds = torch.cat((a, b), dim=1)
+    return embeds.to(dtype=original_dtype)
+
+
+class NamedConditioningField(Protocol):
+    conditioning_name:str
+
+
 @invocation(
     "Conditioning_Math",
     title="Conditioning Math",
@@ -76,98 +119,130 @@ class ConditioningMathInvocation(BaseInvocation):
     )
 
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def invoke(self, context: InvocationContext) -> ConditioningOutput:
-        conditioning_A: BasicConditioningInfo = context.conditioning.load(self.a.conditioning_name).conditionings[0]
-        cA: torch.Tensor = conditioning_A.embeds.detach().clone().to("cpu")
-        dt = cA.dtype
-        cA = cA.to(torch.float32)
-        if self.b is None:
-            cB = torch.zeros_like(cA)
+        self.check_matching_type(context)
+        conditioning_A = self._load_conditioning(context, self.a)
+        conditioning_B = self._load_conditioning(context, self.b)
+
+        cA: torch.Tensor = conditioning_A.embeds
+        cB = conditioning_B.embeds if conditioning_B else None
+        embeds = apply_operation(self.operation, cA, cB, self.alpha)
+
+        if isinstance(conditioning_A, SDXLConditioningInfo):
+            pooled_embeds = conditioning_A.pooled_embeds
+            pooled_B = conditioning_B.pooled_embeds if conditioning_B else None
+            pooled_embeds = apply_operation(self.operation, pooled_embeds, pooled_B, self.alpha)
+
+            conditioning_info = SDXLConditioningInfo(
+                embeds=embeds,
+                pooled_embeds=pooled_embeds,
+                add_time_ids=conditioning_A.add_time_ids, #always from A, just includes size information
+            )
         else:
-            conditioning_B: BasicConditioningInfo = context.conditioning.load(self.b.conditioning_name).conditionings[0]
-            cB = conditioning_B.embeds.detach().clone().to("cpu", dtype=torch.float32)
-        
-            #check that inputs are the same type
-            if type(conditioning_A) != type(conditioning_B):
-                raise ValueError(f"Conditioning A: {type(conditioning_A)} does not match Conditioning B: {type(conditioning_B)}")
-        
-        shape_A = cA.shape
-        shape_B = cB.shape
+            conditioning_info = BasicConditioningInfo(embeds=embeds)
 
-        if (shape_A != shape_B) and (self.operation != "APPEND"):
-            raise ValueError(f"Conditioning A: {shape_A} does not match Conditioning B: {shape_B}")
-        
-        if type(conditioning_A) == BasicConditioningInfo: #NOT SDXL
-            embeds: torch.Tensor = torch.zeros_like(cA)
-
-            if self.operation == "ADD":
-                torch.add(cA, cB, alpha=self.alpha, out=embeds)
-            elif self.operation == "SUB":
-                torch.sub(cA, cB, alpha=self.alpha, out=embeds)
-            elif self.operation == "LERP":
-                torch.lerp(cA, cB, self.alpha, out=embeds)
-            elif self.operation == "PERP":
-                # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
-                #x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
-                embeds = (cA - ((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-            elif self.operation == "PROJ":
-                embeds = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-            elif self.operation == "APPEND":
-                embeds = torch.cat((cA, cB), dim=1)
-                # ec_tokens = cA.shape[1] + ec_B_tokens #append is the only time this changes
-
-            conditioning_data = ConditioningFieldData(
-                conditionings=[BasicConditioningInfo(embeds=embeds.to(dtype=dt))]
-            )
-        else: #SDXL
-            embeds = torch.zeros_like(cA).to(cA.device)
-            pooled_embeds = conditioning_A.pooled_embeds.detach().clone().to("cpu", dtype=torch.float32) #default for operations that don't affect it
-            add_time_ids = conditioning_A.add_time_ids.detach().clone().to("cpu") #default for operations that don't affect it
-
-            if self.b is None:
-                pooled_B = torch.zeros_like(pooled_embeds).to("cpu", dtype=torch.float32)
-                add_time_ids_B = torch.zeros_like(add_time_ids).to("cpu")
-            else:
-                pooled_B = conditioning_B.pooled_embeds.detach().clone().to("cpu", dtype=torch.float32)
-                # add_time_ids_B = conditioning_B.add_time_ids.detach().clone().to("cpu")
-
-            if self.operation == "ADD":
-                torch.add(cA, cB, alpha=self.alpha, out=embeds)
-                torch.add(pooled_embeds, pooled_B, alpha=self.alpha, out=pooled_embeds)
-            elif self.operation == "SUB":
-                torch.sub(cA, cB, alpha=self.alpha, out=embeds)
-                torch.sub(pooled_embeds, pooled_B, alpha=self.alpha, out=pooled_embeds)
-            elif self.operation == "LERP":
-                torch.lerp(cA, cB, self.alpha, out=embeds)
-                torch.lerp(pooled_embeds, pooled_B, self.alpha, out=pooled_embeds)
-            elif self.operation == "PERP":
-                # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
-                #x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
-                embeds = (cA - ((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-                pooled_embeds = (pooled_embeds - ((torch.mul(pooled_embeds, pooled_B).sum())/(torch.norm(pooled_B)**2)) * pooled_B).detach().clone()
-            elif self.operation == "PROJ":
-                embeds = (((torch.mul(cA, cB).sum())/(torch.norm(cB)**2)) * cB).detach().clone()
-                pooled_embeds = (((torch.mul(pooled_embeds, pooled_B).sum())/(torch.norm(pooled_B)**2)) * pooled_B).detach().clone()
-            elif self.operation == "APPEND":
-                embeds = torch.cat((cA, cB), dim=1)
-
-            conditioning_data = ConditioningFieldData(
-                conditionings=[
-                    SDXLConditioningInfo(
-                        embeds=embeds.to(dtype=dt),
-                        pooled_embeds=pooled_embeds.to(dtype=dt),
-                        add_time_ids=add_time_ids, #always from A, just includes size information
-                    )
-                ]
-            )
-        
+        conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
         conditioning_name = context.conditioning.save(conditioning_data)
-
         return ConditioningOutput(
-            conditioning=ConditioningField(
-                conditioning_name=conditioning_name,
+            conditioning=ConditioningField(conditioning_name=conditioning_name)
+        )
+
+
+    def _load_conditioning(self, context: InvocationContext, field: NamedConditioningField) -> (
+        BasicConditioningInfo
+        | SDXLConditioningInfo
+        | FLUXConditioningInfo
+        | SD3ConditioningInfo
+        | CogView4ConditioningInfo
+        | None
+    ):
+        if field is None:
+            return None
+        else:
+            return context.conditioning.load(field.conditioning_name).conditionings[0].to("cpu")
+
+
+    def check_matching_type(self, context):
+        if self.b is None:
+            return
+        conditioning_A = self._load_conditioning(context, self.a)
+        conditioning_B = self._load_conditioning(context, self.b)
+        # check that inputs are the same type
+        if type(conditioning_A) != type(conditioning_B):
+            raise ValueError(
+                f"Conditioning A: {type(conditioning_A)} does not match Conditioning B: {type(conditioning_B)}"
             )
+
+
+@invocation(
+    "FLUX_Conditioning_Math",
+    title="Conditioning Math - FLUX",
+    tags=["math", "conditioning", "prompt", "blend", "interpolate", "append", "perpendicular", "projection"],
+    category="math",
+    version="1.0.1",
+)
+class FluxConditioningMathInvocation(ConditioningMathInvocation):
+    a: FluxConditioningField = InputField(
+        description="Conditioning A",
+        input=Input.Connection, #A is required for extra information in some operations
+        ui_order=0,
+    )
+    b: FluxConditioningField = InputField(
+        description="Conditioning B",
+        default=None,
+        ui_order=1,
+    )
+
+    def invoke(self, context: InvocationContext) -> FluxConditioningOutput:
+        conditioning_A = self._load_conditioning(context, self.a)
+        conditioning_B = self._load_conditioning(context, self.b)
+        clip_a: torch.Tensor = conditioning_A.clip_embeds
+        clip_b: torch.Tensor = conditioning_B.clip_embeds if conditioning_B else None
+        clip_embeds = apply_operation(self.operation, clip_a, clip_b, self.alpha)
+
+        t5_a: torch.Tensor = conditioning_A.t5_embeds
+        t5_b: torch.Tensor = conditioning_B.t5_embeds if conditioning_B else None
+        t5_embeds = apply_operation(self.operation, t5_a, t5_b, self.alpha)
+        conditioning_info = FLUXConditioningInfo(clip_embeds, t5_embeds)
+        conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
+        conditioning_name = context.conditioning.save(conditioning_data)
+        return FluxConditioningOutput(
+            conditioning=FluxConditioningField(conditioning_name=conditioning_name)
+        )
+
+
+@invocation(
+    "CogView4_Conditioning_Math",
+    title="Conditioning Math - CogView4",
+    tags=["math", "conditioning", "prompt", "blend", "interpolate", "append", "perpendicular", "projection"],
+    category="math",
+    version="1.0.1",
+)
+class CogView4ConditioningMathInvocation(ConditioningMathInvocation):
+    a: CogView4ConditioningField = InputField(
+        description="Conditioning A",
+        input=Input.Connection, #A is required for extra information in some operations
+        ui_order=0,
+    )
+    b: CogView4ConditioningField = InputField(
+        description="Conditioning B",
+        default=None,
+        ui_order=1,
+    )
+
+    def invoke(self, context: InvocationContext) -> CogView4ConditioningOutput:
+        conditioning_A = self._load_conditioning(context, self.a)
+        conditioning_B = self._load_conditioning(context, self.b)
+        glm_a: torch.Tensor = conditioning_A.glm_embeds
+        glm_b: torch.Tensor = conditioning_B.glm_embeds if conditioning_B else None
+        glm_embeds = apply_operation(self.operation, glm_a, glm_b, self.alpha)
+
+        conditioning_info = CogView4ConditioningInfo(glm_embeds)
+        conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
+        conditioning_name = context.conditioning.save(conditioning_data)
+        return CogView4ConditioningOutput(
+            conditioning=CogView4ConditioningField(conditioning_name=conditioning_name)
         )
 
 
