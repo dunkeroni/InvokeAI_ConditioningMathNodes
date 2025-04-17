@@ -1,6 +1,7 @@
 from typing import Literal, Protocol
 
 import numpy as np
+import sympy
 import torch
 
 from invokeai.app.invocations.fields import (
@@ -72,17 +73,52 @@ def apply_operation(operation: CONDITIONING_OPERATIONS, a: torch.Tensor, b: torc
         case "PERP":
             # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
             # x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
-            embeds = (a - (
-                    (torch.mul(a, b).sum()) / (torch.norm(b) ** 2)) * b).detach().clone()
+            embeds = perp(a, b).detach().clone()
         case "PROJ":
-            embeds = (((torch.mul(a, b).sum()) / (torch.norm(b) ** 2)) * b).detach().clone()
+            embeds = proj(a, b).detach().clone()
         case "APPEND":
             embeds = torch.cat((a, b), dim=1)
     return embeds.to(dtype=original_dtype)
 
 
+def perp(a, b):
+    """
+    The perpendicular component of a vector `a`, relative to vector `b`.
+
+    :param a: Input vector to be resolved into a perpendicular component
+    :param b: Vector relative to which the perpendicular component of `a` is calculated
+    :return: Perpendicular component of vector `a` relative to vector `b`
+    """
+    return a - (torch.mul(a, b).sum() / (torch.norm(b) ** 2)) * b
+
+
+def proj(a, b):
+    """
+    Projects vector `a` onto vector `b`.
+
+    :param a: The vector that is being projected.
+    :param b: The vector onto which `a` is being projected.
+    :return: The projection of vector `a` onto vector `b`.
+    """
+    return (torch.mul(a, b).sum() / (torch.norm(b) ** 2)) * b
+
+
 class NamedConditioningField(Protocol):
     conditioning_name:str
+
+
+def _load_conditioning(context: InvocationContext, field: NamedConditioningField) -> (
+    BasicConditioningInfo
+    | SDXLConditioningInfo
+    | FLUXConditioningInfo
+    | SD3ConditioningInfo
+    | CogView4ConditioningInfo
+    | None
+):
+    if field is None:
+        return None
+    else:
+        return context.conditioning.load(field.conditioning_name).conditionings[0].to("cpu")
 
 
 @invocation(
@@ -122,8 +158,8 @@ class ConditioningMathInvocation(BaseInvocation):
     @torch.inference_mode()
     def invoke(self, context: InvocationContext) -> ConditioningOutput:
         self.check_matching_type(context)
-        conditioning_A = self._load_conditioning(context, self.a)
-        conditioning_B = self._load_conditioning(context, self.b)
+        conditioning_A = _load_conditioning(context, self.a)
+        conditioning_B = _load_conditioning(context, self.b)
 
         cA: torch.Tensor = conditioning_A.embeds
         cB = conditioning_B.embeds if conditioning_B else None
@@ -148,26 +184,11 @@ class ConditioningMathInvocation(BaseInvocation):
             conditioning=ConditioningField(conditioning_name=conditioning_name)
         )
 
-
-    def _load_conditioning(self, context: InvocationContext, field: NamedConditioningField) -> (
-        BasicConditioningInfo
-        | SDXLConditioningInfo
-        | FLUXConditioningInfo
-        | SD3ConditioningInfo
-        | CogView4ConditioningInfo
-        | None
-    ):
-        if field is None:
-            return None
-        else:
-            return context.conditioning.load(field.conditioning_name).conditionings[0].to("cpu")
-
-
     def check_matching_type(self, context):
         if self.b is None:
             return
-        conditioning_A = self._load_conditioning(context, self.a)
-        conditioning_B = self._load_conditioning(context, self.b)
+        conditioning_A = _load_conditioning(context, self.a)
+        conditioning_B = _load_conditioning(context, self.b)
         # check that inputs are the same type
         if type(conditioning_A) != type(conditioning_B):
             raise ValueError(
@@ -195,8 +216,8 @@ class FluxConditioningMathInvocation(ConditioningMathInvocation):
     )
 
     def invoke(self, context: InvocationContext) -> FluxConditioningOutput:
-        conditioning_A = self._load_conditioning(context, self.a)
-        conditioning_B = self._load_conditioning(context, self.b)
+        conditioning_A = _load_conditioning(context, self.a)
+        conditioning_B = _load_conditioning(context, self.b)
         clip_a: torch.Tensor = conditioning_A.clip_embeds
         clip_b: torch.Tensor = conditioning_B.clip_embeds if conditioning_B else None
         clip_embeds = apply_operation(self.operation, clip_a, clip_b, self.alpha)
@@ -209,6 +230,91 @@ class FluxConditioningMathInvocation(ConditioningMathInvocation):
         conditioning_name = context.conditioning.save(conditioning_data)
         return FluxConditioningOutput(
             conditioning=FluxConditioningField(conditioning_name=conditioning_name)
+        )
+
+
+@invocation(
+    "FLUX_Conditioning_Freeform_Math",
+    title="Conditioning Math Freeform - FLUX",
+    tags=["math", "conditioning", "prompt", "blend", "interpolate", "append", "perpendicular", "projection"],
+    category="math",
+    version="1.0.2",
+)
+class FluxConditioningFreeformMathInvocation(BaseInvocation):
+    c1: FluxConditioningField = InputField(
+        description="Conditioning 1",
+        title="c1",
+        input=Input.Connection,
+    )
+    c2: FluxConditioningField | None = InputField(
+        description="Conditioning 2", title="c2", default=None
+    )
+    c3: FluxConditioningField | None = InputField(
+        description="Conditioning 3", title="c3", default=None,
+    )
+    c4: FluxConditioningField | None = InputField(
+        description="Conditioning 4", title="c4", default=None,
+    )
+    c5: FluxConditioningField | None = InputField(
+        description="Conditioning 5", title="c5", default=None,
+    )
+    a: float = InputField(default=1, title="a")
+    b: float = InputField(default=0, title="b")
+
+    formula: str = InputField(description="Formula to apply to conditionings c1–c5. proj, perp, and all torch functions available.",
+                              default="c1")
+
+
+    def invoke(self, context: InvocationContext) -> FluxConditioningOutput:
+        func = self._func_from_string(self.formula)
+
+        clip_1 = self._clip_embeds(context, self.c1)
+        clip_2 = self._clip_embeds(context, self.c2, clip_1)
+        clip_3 = self._clip_embeds(context, self.c3, clip_1)
+        clip_4 = self._clip_embeds(context, self.c4, clip_1)
+        clip_5 = self._clip_embeds(context, self.c5, clip_1)
+        clip_embeds = func(clip_1, clip_2, clip_3, clip_4, clip_5, self.a, self.b)
+
+        t5_1 = self._t5_embeds(context, self.c1)
+        t5_2 = self._t5_embeds(context, self.c2, t5_1)
+        t5_3 = self._t5_embeds(context, self.c3, t5_1)
+        t5_4 = self._t5_embeds(context, self.c4, t5_1)
+        t5_5 = self._t5_embeds(context, self.c5, t5_1)
+        t5_embeds = func(t5_1, t5_2, t5_3, t5_4, t5_5, self.a, self.b)
+
+        conditioning_info = FLUXConditioningInfo(clip_embeds, t5_embeds)
+        conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
+        conditioning_name = context.conditioning.save(conditioning_data)
+        return FluxConditioningOutput(
+            conditioning=FluxConditioningField(conditioning_name=conditioning_name)
+        )
+
+    def _clip_embeds(
+        self, context, field: FluxConditioningField, like: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
+        cond = _load_conditioning(context, field)
+        if cond:
+            return cond.clip_embeds
+        if like is not None:
+            return torch.zeros_like(like)
+        return None
+
+    def _t5_embeds(
+        self, context, field: FluxConditioningField, like: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
+        cond = _load_conditioning(context, field)
+        if cond:
+            return cond.t5_embeds
+        if like is not None:
+            return torch.zeros_like(like)
+        return None
+
+    def _func_from_string(self, formula: str):
+        custom_functions = dict(proj=proj, perp=perp)
+        return sympy.lambdify(
+            sympy.symbols("c1 c2 c3 c4 c5 a b"),
+            sympy.sympify(formula),
+            [custom_functions, torch],
         )
 
 
@@ -232,8 +338,8 @@ class CogView4ConditioningMathInvocation(ConditioningMathInvocation):
     )
 
     def invoke(self, context: InvocationContext) -> CogView4ConditioningOutput:
-        conditioning_A = self._load_conditioning(context, self.a)
-        conditioning_B = self._load_conditioning(context, self.b)
+        conditioning_A = _load_conditioning(context, self.a)
+        conditioning_B = _load_conditioning(context, self.b)
         glm_a: torch.Tensor = conditioning_A.glm_embeds
         glm_b: torch.Tensor = conditioning_B.glm_embeds if conditioning_B else None
         glm_embeds = apply_operation(self.operation, glm_a, glm_b, self.alpha)
