@@ -33,8 +33,7 @@ from invokeai.invocation_api import (
     invocation,
     invocation_output,
 )
-
-
+from . import torch_funcs
 
 CONDITIONING_OPERATIONS = Literal[
     "LERP",
@@ -76,34 +75,12 @@ def apply_operation(operation: CONDITIONING_OPERATIONS, a: torch.Tensor, b: torc
         case "PERP":
             # https://github.com/Perp-Neg/Perp-Neg-stablediffusion/blob/main/perpneg_diffusion/perpneg_stable_diffusion/pipeline_perpneg_stable_diffusion.py
             # x - ((torch.mul(x, y).sum())/(torch.norm(y)**2)) * y
-            embeds = perp(a, b).detach().clone()
+            embeds = torch_funcs.perp(a, b).detach().clone()
         case "PROJ":
-            embeds = proj(a, b).detach().clone()
+            embeds = torch_funcs.proj(a, b).detach().clone()
         case "APPEND":
             embeds = torch.cat((a, b), dim=1)
     return embeds.to(dtype=original_dtype)
-
-
-def perp(a, b):
-    """
-    The perpendicular component of a vector `a`, relative to vector `b`.
-
-    :param a: Input vector to be resolved into a perpendicular component
-    :param b: Vector relative to which the perpendicular component of `a` is calculated
-    :return: Perpendicular component of vector `a` relative to vector `b`
-    """
-    return a - (torch.mul(a, b).sum() / (torch.norm(b) ** 2)) * b
-
-
-def proj(a, b):
-    """
-    Projects vector `a` onto vector `b`.
-
-    :param a: The vector that is being projected.
-    :param b: The vector onto which `a` is being projected.
-    :return: The projection of vector `a` onto vector `b`.
-    """
-    return (torch.mul(a, b).sum() / (torch.norm(b) ** 2)) * b
 
 
 class NamedConditioningField(Protocol):
@@ -313,11 +290,10 @@ class FluxConditioningFreeformMathInvocation(BaseInvocation):
         return None
 
     def _func_from_string(self, formula: str):
-        custom_functions = dict(proj=proj, perp=perp)
         return sympy.lambdify(
             sympy.symbols("c1 c2 c3 c4 c5 a b"),
             sympy.sympify(formula),
-            [custom_functions, torch],
+            [torch_funcs.functions, torch],
         )
 
 
@@ -380,11 +356,10 @@ class FluxReduxConditioningFreeformMathInvocation(BaseInvocation):
 
 
     def _func_from_string(self, formula: str):
-        custom_functions = dict(proj=proj, perp=perp)
         return sympy.lambdify(
             sympy.symbols("c1 c2 c3 c4 c5 a b"),
             sympy.sympify(formula),
-            [custom_functions, torch],
+            [torch_funcs.functions, torch],
         )
 
 
