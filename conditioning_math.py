@@ -7,7 +7,10 @@ import torch
 from invokeai.app.invocations.fields import (
     FluxConditioningField,
     CogView4ConditioningField,
+    FluxReduxConditioningField,
+    TensorField,
 )
+from invokeai.app.invocations.flux_redux import FluxReduxOutput
 from invokeai.app.invocations.primitives import (
     FluxConditioningOutput,
     CogView4ConditioningOutput,
@@ -290,7 +293,7 @@ class FluxConditioningFreeformMathInvocation(BaseInvocation):
         )
 
     def _clip_embeds(
-        self, context, field: FluxConditioningField, like: torch.Tensor | None = None
+        self, context: InvocationContext, field: FluxConditioningField | None, like: torch.Tensor | None = None
     ) -> torch.Tensor | None:
         cond = _load_conditioning(context, field)
         if cond:
@@ -300,7 +303,7 @@ class FluxConditioningFreeformMathInvocation(BaseInvocation):
         return None
 
     def _t5_embeds(
-        self, context, field: FluxConditioningField, like: torch.Tensor | None = None
+        self, context: InvocationContext, field: FluxConditioningField | None, like: torch.Tensor | None = None
     ) -> torch.Tensor | None:
         cond = _load_conditioning(context, field)
         if cond:
@@ -308,6 +311,73 @@ class FluxConditioningFreeformMathInvocation(BaseInvocation):
         if like is not None:
             return torch.zeros_like(like)
         return None
+
+    def _func_from_string(self, formula: str):
+        custom_functions = dict(proj=proj, perp=perp)
+        return sympy.lambdify(
+            sympy.symbols("c1 c2 c3 c4 c5 a b"),
+            sympy.sympify(formula),
+            [custom_functions, torch],
+        )
+
+
+@invocation(
+    "FLUX_Redux_Conditioning_Freeform_Math",
+    title="Conditioning Math Freeform - FLUX Redux",
+    tags=["math", "conditioning", "prompt", "blend", "interpolate", "append", "perpendicular", "projection"],
+    category="math",
+    version="1.0.0",
+)
+class FluxReduxConditioningFreeformMathInvocation(BaseInvocation):
+    c1: FluxReduxConditioningField = InputField(
+        description="Conditioning 1",
+        title="c1",
+        input=Input.Connection,
+    )
+    c2: FluxReduxConditioningField | None = InputField(
+        description="Conditioning 2", title="c2", default=None
+    )
+    c3: FluxReduxConditioningField | None = InputField(
+        description="Conditioning 3", title="c3", default=None,
+    )
+    c4: FluxReduxConditioningField | None = InputField(
+        description="Conditioning 4", title="c4", default=None,
+    )
+    c5: FluxReduxConditioningField | None = InputField(
+        description="Conditioning 5", title="c5", default=None,
+    )
+    a: float = InputField(default=1, title="a")
+    b: float = InputField(default=0, title="b")
+
+    formula: str = InputField(description="Formula to apply to conditionings c1–c5. proj, perp, and all torch functions available.",
+                              default="c1")
+
+
+    def invoke(self, context: InvocationContext) -> FluxReduxOutput:
+        func = self._func_from_string(self.formula)
+
+        redux_1 = self._redux_embeds(context, self.c1)
+        redux_2 = self._redux_embeds(context, self.c2, redux_1)
+        redux_3 = self._redux_embeds(context, self.c3, redux_1)
+        redux_4 = self._redux_embeds(context, self.c4, redux_1)
+        redux_5 = self._redux_embeds(context, self.c5, redux_1)
+        redux_embeds = func(redux_1, redux_2, redux_3, redux_4, redux_5, self.a, self.b)
+
+        conditioning_name = context.tensors.save(redux_embeds)
+        return FluxReduxOutput(
+            redux_cond=FluxReduxConditioningField(conditioning=TensorField(tensor_name=conditioning_name))
+        )
+
+
+    def _redux_embeds(
+        self, context: InvocationContext, field: FluxReduxConditioningField | None, like: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
+        if field:
+            return context.tensors.load(field.conditioning.tensor_name)
+        if like is not None:
+            return torch.zeros_like(like)
+        return None
+
 
     def _func_from_string(self, formula: str):
         custom_functions = dict(proj=proj, perp=perp)
