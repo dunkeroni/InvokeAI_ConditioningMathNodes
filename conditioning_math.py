@@ -1,4 +1,4 @@
-from typing import Literal, Protocol
+from typing import Literal, Protocol, Optional
 
 import numpy as np
 import torch
@@ -100,9 +100,8 @@ class ConditioningMathInvocation(BaseInvocation):
         input=Input.Connection, #A is required for extra information in some operations
         ui_order=0,
     )
-    b: ConditioningField = InputField(
+    b: Optional[ConditioningField] = InputField(
         description="Conditioning B",
-        default=None,
         ui_order=1,
     )
     alpha: float = InputField(
@@ -188,9 +187,8 @@ class FluxConditioningMathInvocation(ConditioningMathInvocation):
         input=Input.Connection, #A is required for extra information in some operations
         ui_order=0,
     )
-    b: FluxConditioningField = InputField(
+    b: Optional[FluxConditioningField] = InputField(
         description="Conditioning B",
-        default=None,
         ui_order=1,
     )
 
@@ -225,9 +223,8 @@ class CogView4ConditioningMathInvocation(ConditioningMathInvocation):
         input=Input.Connection, #A is required for extra information in some operations
         ui_order=0,
     )
-    b: CogView4ConditioningField = InputField(
+    b: Optional[CogView4ConditioningField] = InputField(
         description="Conditioning B",
-        default=None,
         ui_order=1,
     )
 
