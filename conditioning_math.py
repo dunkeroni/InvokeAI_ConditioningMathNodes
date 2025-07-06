@@ -481,3 +481,63 @@ class NormalizeConditioningInvocation(BaseInvocation):
             token_length=c.shape[2],
             token_space=c.shape[1],
         )
+
+
+@invocation(
+    "FLUX_make_random_conditioning_like",
+    title="Make Random Conditioning Like - FLUX",
+    tags=["math", "conditioning", "random"],
+    category="math",
+    version="1.0.0",
+)
+class MakeRandomConditioningLikeInvocation(BaseInvocation):
+    """Make random conditioning, normal distribution, like the shape of the input FLUX conditioning"""
+
+    conditioning: FluxConditioningField = InputField(
+        description="Source Conditioning",
+        input=Input.Connection,
+    )
+    seed: int = InputField(
+        default=0,
+        description="Random seed to use",
+    )
+
+    def invoke(self, context: InvocationContext) -> FluxConditioningOutput:
+        def _randn_like(tensor: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
+            return torch.randn(tensor.shape, dtype=tensor.dtype, device=tensor.device, generator=generator)
+
+        clip = self._clip_embeds(context, self.conditioning)
+        t5 = self._t5_embeds(context, self.conditioning)
+        generator = torch.Generator(device=clip.device) # Assume this is the same as t5.device
+
+        generator.manual_seed(int(self.seed))
+
+        clip_embeds = _randn_like(clip, generator)
+        t5_embeds = _randn_like(t5, generator)
+
+        conditioning_info = FLUXConditioningInfo(clip_embeds, t5_embeds)
+        conditioning_data = ConditioningFieldData(conditionings=[conditioning_info])
+        conditioning_name = context.conditioning.save(conditioning_data)
+        return FluxConditioningOutput(
+            conditioning=FluxConditioningField(conditioning_name=conditioning_name)
+        )
+
+    def _clip_embeds(
+        self, context: InvocationContext, field: FluxConditioningField | None, like: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
+        cond = _load_conditioning(context, field)
+        if cond:
+            return cond.clip_embeds
+        if like is not None:
+            return torch.zeros_like(like)
+        return None
+
+    def _t5_embeds(
+        self, context: InvocationContext, field: FluxConditioningField | None, like: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
+        cond = _load_conditioning(context, field)
+        if cond:
+            return cond.t5_embeds
+        if like is not None:
+            return torch.zeros_like(like)
+        return None
